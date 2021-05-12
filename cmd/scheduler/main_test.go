@@ -35,7 +35,9 @@ import (
 
 	"sigs.k8s.io/scheduler-plugins/pkg/coscheduling"
 	"sigs.k8s.io/scheduler-plugins/pkg/noderesources"
+	"sigs.k8s.io/scheduler-plugins/pkg/podstate"
 	"sigs.k8s.io/scheduler-plugins/pkg/qos"
+	"sigs.k8s.io/scheduler-plugins/pkg/trimaran/loadvariationriskbalancing"
 	"sigs.k8s.io/scheduler-plugins/pkg/trimaran/targetloadpacking"
 )
 
@@ -87,9 +89,6 @@ clientConnection:
   kubeconfig: "%s"
 profiles:
 - plugins:
-    queueSort:
-      disabled:
-      - name: "*"
     preFilter:
       disabled:
       - name: "*"
@@ -333,6 +332,33 @@ profiles:
 		t.Fatal(err)
 	}
 
+	// LoadVariationRiskBalancing plugin config with arguments
+	loadVariationRiskBalancingConfigWithArgsFile := filepath.Join(tmpDir, "loadVariationRiskBalancing-with-args.yaml")
+	if err := ioutil.WriteFile(loadVariationRiskBalancingConfigWithArgsFile, []byte(fmt.Sprintf(`
+apiVersion: kubescheduler.config.k8s.io/v1beta1
+kind: KubeSchedulerConfiguration
+clientConnection:
+  kubeconfig: "%s"
+profiles:
+- plugins:
+    score:
+      enabled:
+      - name: LoadVariationRiskBalancing
+      disabled:
+      - name: "*"
+  pluginConfig:
+  - name: LoadVariationRiskBalancing
+    args:
+      metricProvider:
+        type: Prometheus
+        address: http://prometheus-k8s.monitoring.svc.cluster.local:9090
+      safeVarianceMargin: 1
+      safeVarianceSensitivity: 2.5
+      watcherAddress: http://deadbeef:2020
+`, configKubeconfig)), os.FileMode(0600)); err != nil {
+		t.Fatal(err)
+	}
+
 	// multiple profiles config
 	multiProfilesConfig := filepath.Join(tmpDir, "multi-profiles.yaml")
 	if err := ioutil.WriteFile(multiProfilesConfig, []byte(fmt.Sprintf(`
@@ -376,12 +402,12 @@ profiles:
 		},
 		"FilterPlugin": {
 			{Name: "NodeUnschedulable"},
-			{Name: "NodeResourcesFit"},
 			{Name: "NodeName"},
-			{Name: "NodePorts"},
-			{Name: "NodeAffinity"},
-			{Name: "VolumeRestrictions"},
 			{Name: "TaintToleration"},
+			{Name: "NodeAffinity"},
+			{Name: "NodePorts"},
+			{Name: "NodeResourcesFit"},
+			{Name: "VolumeRestrictions"},
 			{Name: "EBSLimits"},
 			{Name: "GCEPDLimits"},
 			{Name: "NodeVolumeLimits"},
@@ -398,7 +424,6 @@ profiles:
 			{Name: "InterPodAffinity"},
 			{Name: "PodTopologySpread"},
 			{Name: "TaintToleration"},
-			{Name: "SelectorSpread"},
 		},
 		"ScorePlugin": {
 			{Name: "NodeResourcesBalancedAllocation", Weight: 1},
@@ -409,7 +434,6 @@ profiles:
 			{Name: "NodePreferAvoidPods", Weight: 10000},
 			{Name: "PodTopologySpread", Weight: 2},
 			{Name: "TaintToleration", Weight: 1},
-			{Name: "SelectorSpread", Weight: 1},
 		},
 		"BindPlugin":    {{Name: "DefaultBinder"}},
 		"ReservePlugin": {{Name: "VolumeBinding"}},
@@ -429,6 +453,21 @@ profiles:
 			},
 			wantPlugins: map[string]map[string][]kubeschedulerconfig.Plugin{
 				"default-scheduler": defaultPlugins,
+			},
+		},
+		{
+			name:            "single profile config - PodState",
+			flags:           []string{"--config", podStateConfigFile},
+			registryOptions: []app.Option{app.WithPlugin(podstate.Name, podstate.New)},
+			wantPlugins: map[string]map[string][]kubeschedulerconfig.Plugin{
+				"default-scheduler": {
+					"QueueSortPlugin":  defaultPlugins["QueueSortPlugin"],
+					"BindPlugin":       {{Name: "DefaultBinder"}},
+					"PostFilterPlugin": {{Name: "DefaultPreemption"}},
+					"ScorePlugin":      {{Name: "PodState", Weight: 1}},
+					"ReservePlugin":    {{Name: "VolumeBinding"}},
+					"PreBindPlugin":    {{Name: "VolumeBinding"}},
+				},
 			},
 		},
 		{
@@ -530,6 +569,24 @@ profiles:
 					"QueueSortPlugin":  defaultPlugins["QueueSortPlugin"],
 					"ReservePlugin":    {{Name: "VolumeBinding"}},
 					"ScorePlugin":      {{Name: targetloadpacking.Name, Weight: 1}},
+				},
+			},
+		},
+		{
+			name:            "single profile config - LoadVariationRiskBalancing with args",
+			flags:           []string{"--config", loadVariationRiskBalancingConfigWithArgsFile},
+			registryOptions: []app.Option{app.WithPlugin(loadvariationriskbalancing.Name, loadvariationriskbalancing.New)},
+			wantPlugins: map[string]map[string][]kubeschedulerconfig.Plugin{
+				"default-scheduler": {
+					"BindPlugin":       {{Name: "DefaultBinder"}},
+					"FilterPlugin":     defaultPlugins["FilterPlugin"],
+					"PostFilterPlugin": {{Name: "DefaultPreemption"}},
+					"PreBindPlugin":    {{Name: "VolumeBinding"}},
+					"PreFilterPlugin":  defaultPlugins["PreFilterPlugin"],
+					"PreScorePlugin":   defaultPlugins["PreScorePlugin"],
+					"QueueSortPlugin":  defaultPlugins["QueueSortPlugin"],
+					"ReservePlugin":    {{Name: "VolumeBinding"}},
+					"ScorePlugin":      {{Name: loadvariationriskbalancing.Name, Weight: 1}},
 				},
 			},
 		},
